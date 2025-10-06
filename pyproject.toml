@@ -1,0 +1,33 @@
+[build-system]
+requires = ["setuptools", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "medical-bill-explainer"
+version = "0.1.0"
+description = "Medical bill parsing and explanation toolkit"
+authors = [{name = "Example", email = "dev@example.com"}]
+readme = "README.md"
+requires-python = ">=3.11"
+dependencies = [
+    "fastapi",
+    "uvicorn",
+    "pdfplumber",
+    "pypdf",
+    "pytesseract",
+    "opencv-python",
+    "layoutparser",
+    "camelot-py[cv]",
+    "tabula-py",
+    "jinja2",
+    "weasyprint",
+    "pydantic-settings",
+    "rapidfuzz",
+    "pytest",
+]
+
+[project.optional-dependencies]
+dev = ["pytest", "pytest-cov", "black", "ruff"]
+
+[tool.setuptools.packages.find]
+where = ["."]

@@ -1,0 +1,18 @@
+{
+  "99213": {
+    "description": "Office visit with a healthcare provider for an established patient",
+    "necessity": "This evaluation visit lets the clinician assess symptoms, adjust treatment, and document progress so future care is medically justified."
+  },
+  "80053": {
+    "description": "Comprehensive metabolic blood panel",
+    "necessity": "Lab panel checks kidney, liver, and electrolyte status to guide treatment decisions and medication safety."
+  },
+  "85025": {
+    "description": "Complete blood count with differential",
+    "necessity": "Blood counts help monitor for infection, anemia, or medication side effects that influence care plans."
+  },
+  "73721": {
+    "description": "MRI of lower extremity joint without contrast",
+    "necessity": "Imaging provides detailed joint anatomy to confirm diagnosis and plan appropriate therapy or surgery."
+  }
+}

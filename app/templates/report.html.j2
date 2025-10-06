@@ -1,0 +1,103 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Medical Bill Explainer</title>
+  <style>
+    body { font-family: 'Helvetica Neue', Arial, sans-serif; background: #f9fafb; color: #111827; margin: 0; padding: 0; }
+    main { max-width: 960px; margin: 2rem auto; background: white; padding: 2rem 3rem; box-shadow: 0 2px 10px rgba(15, 23, 42, 0.08); border-radius: 12px; }
+    header { border-bottom: 2px solid #e5e7eb; padding-bottom: 1rem; margin-bottom: 1.5rem; }
+    h1 { margin: 0; font-size: 2rem; }
+    .meta { display: grid; grid-template-columns: repeat(auto-fit, minmax(200px, 1fr)); gap: 0.75rem; margin-top: 1rem; font-size: 0.95rem; }
+    .totals { display: grid; grid-template-columns: repeat(auto-fit, minmax(160px, 1fr)); gap: 1rem; margin-top: 2rem; }
+    .card { background: #eff6ff; border-radius: 10px; padding: 1rem; }
+    table { width: 100%; border-collapse: collapse; margin-top: 1.5rem; }
+    th, td { text-align: left; border-bottom: 1px solid #e5e7eb; padding: 0.75rem 0.5rem; font-size: 0.95rem; }
+    th { background: #f1f5f9; text-transform: uppercase; font-size: 0.8rem; letter-spacing: 0.04em; }
+    .explanation { margin-top: 0.5rem; font-size: 0.95rem; color: #1f2937; }
+    footer { margin-top: 3rem; font-size: 0.85rem; color: #4b5563; text-align: center; }
+    .glossary { margin-top: 2rem; }
+    .glossary dt { font-weight: bold; }
+    .glossary dd { margin: 0 0 1rem 0; }
+  </style>
+</head>
+<body>
+<main>
+  <header>
+    <h1>Medical Bill Explainer</h1>
+    <div class="meta">
+      <div><strong>Provider:</strong> {{ document.header.provider or "Unknown" }}</div>
+      <div><strong>Payer:</strong> {{ document.header.payer or "Unknown" }}</div>
+      <div><strong>Patient:</strong> {{ document.header.patient or "Redacted" }}</div>
+      <div><strong>Account #:</strong> {{ document.header.account_number or "Redacted" }}</div>
+    </div>
+  </header>
+  <section class="totals">
+    <div class="card"><strong>Total Charge</strong><div>{{ settings.output_currency }}{{ '%.2f'|format(document.totals.total_charge) }}</div></div>
+    <div class="card"><strong>Total Allowed</strong><div>{{ settings.output_currency }}{{ '%.2f'|format(document.totals.total_allowed) }}</div></div>
+    <div class="card"><strong>Insurance Paid</strong><div>{{ settings.output_currency }}{{ '%.2f'|format(document.totals.payer_paid) }}</div></div>
+    <div class="card"><strong>Patient Responsibility</strong><div>{{ settings.output_currency }}{{ '%.2f'|format(document.totals.patient_owes) }}</div></div>
+  </section>
+  <section>
+    <h2>Line Item Details</h2>
+    <table>
+      <thead>
+        <tr>
+          <th>#</th>
+          <th>Date</th>
+          <th>Code</th>
+          <th>Description</th>
+          <th>Charge</th>
+          <th>Allowed</th>
+          <th>Adjustments</th>
+          <th>Insurance Paid</th>
+          <th>Patient Responsibility</th>
+        </tr>
+      </thead>
+      <tbody>
+        {% for line in document.lines %}
+        <tr>
+          <td>{{ line.line_no }}</td>
+          <td>{{ line.date_of_service or "—" }}</td>
+          <td>{{ line.code or "—" }}</td>
+          <td>
+            {{ line.description_raw }}
+            <div class="explanation">{{ line.explanation }}</div>
+            {% if line.warnings %}
+              <div style="color:#dc2626; font-size:0.85rem;">Warnings: {{ line.warnings | join(', ') }}</div>
+            {% endif %}
+          </td>
+          <td>{{ settings.output_currency }}{{ '%.2f'|format(line.charge) }}</td>
+          <td>{% if line.allowed is not none %}{{ settings.output_currency }}{{ '%.2f'|format(line.allowed) }}{% else %}—{% endif %}</td>
+          <td>
+            {% if line.adjustments %}
+              {% for adj in line.adjustments %}
+                {{ adj.type|title }} {{ settings.output_currency }}{{ '%.2f'|format(adj.amount) }}<br />
+              {% endfor %}
+            {% else %}—{% endif %}
+          </td>
+          <td>{% if line.payer_paid is not none %}{{ settings.output_currency }}{{ '%.2f'|format(line.payer_paid) }}{% else %}—{% endif %}</td>
+          <td>{{ settings.output_currency }}{{ '%.2f'|format(line.patient_owes_line) }}</td>
+        </tr>
+        {% endfor %}
+      </tbody>
+    </table>
+  </section>
+  <section class="glossary">
+    <h2>Glossary</h2>
+    <dl>
+      <dt>Allowed Amount</dt>
+      <dd>The maximum payment the insurer considers for a service.</dd>
+      <dt>Contractual Adjustment</dt>
+      <dd>A discount negotiated between the provider and payer.</dd>
+      <dt>Patient Responsibility</dt>
+      <dd>The amount the patient is expected to pay after insurance.</dd>
+    </dl>
+  </section>
+  <footer>
+    {{ settings.report_footer_disclaimer }}
+  </footer>
+</main>
+</body>
+</html>

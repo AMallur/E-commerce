@@ -1,0 +1,14 @@
+fastapi
+uvicorn
+jinja2
+weasyprint
+camelot-py[cv]
+tabula-py
+opencv-python
+pytesseract
+layoutparser
+pdfplumber
+pypdf
+pydantic-settings
+rapidfuzz
+pytest
