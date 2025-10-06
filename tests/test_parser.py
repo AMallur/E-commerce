@@ -14,8 +14,13 @@ def test_parse_digital_provider_invoice(tmp_path):
     document = parse_document(pdf, settings=settings)
     assert document.totals.total_charge == pytest.approx(350.0)
     assert len(document.lines) >= 1
+    assert document.doc_type == "eob"
+    for line in document.lines:
+        assert "patient" in line.explanation.lower()
+        assert line.patient_owes_line >= 0
     payload = parsed_document_to_dict(document)
     assert payload["totals"]["patient_owes"] >= 0
+    assert "patient_resp_components" in payload["lines"][0]
 
 
 def test_negative_adjustment(tmp_path):

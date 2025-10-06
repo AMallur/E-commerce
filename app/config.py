@@ -2,7 +2,7 @@
 from __future__ import annotations
 
 from pathlib import Path
-from typing import List, Optional
+from typing import Dict, List, Optional
 
 from pydantic import Field, validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
@@ -28,6 +28,9 @@ class AppSettings(BaseSettings):
     ocr_languages: str = Field(default="eng", description="Languages to use for OCR.")
     llm_provider: Optional[str] = Field(default=None, description="LLM provider identifier.")
     llm_api_key: Optional[str] = Field(default=None, description="LLM provider API key.")
+    llm_model: Optional[str] = Field(default=None, description="Preferred chat model for LLM explanations.")
+    llm_temperature: float = Field(default=0.2, description="Sampling temperature for LLM completions.")
+    llm_max_tokens: int = Field(default=350, description="Max tokens returned from the LLM explainer.")
     report_footer_disclaimer: str = Field(
         default="Educational summary, not medical or legal advice.",
         description="Disclaimer text for generated reports.",
@@ -57,6 +60,26 @@ class AppSettings(BaseSettings):
         default=Path("data/glossary.json"), description="Path to glossary terms for reports."
     )
     enable_llm: bool = Field(default=False, description="Enable LLM powered explanations.")
+    header_synonyms: Dict[str, List[str]] = Field(
+        default_factory=lambda: {
+            "description": ["description", "service", "item", "procedure", "cpt description"],
+            "code": ["code", "cpt", "hcpcs", "rev", "rev code", "procedure code"],
+            "code_type": ["code type", "cpt/hcpcs", "rev type"],
+            "modifiers": ["modifiers", "modifier"],
+            "units": ["units", "qty", "quantity"],
+            "date_of_service": ["dos", "date", "service date", "date of service"],
+            "charge": ["charge", "charges", "billed", "amount", "amount billed"],
+            "allowed": ["allowed", "allowed amount", "allowed amt", "negotiated", "contracted"],
+            "adjustment": ["adjustment", "adjustments", "adj", "discount", "write off"],
+            "payer_paid": ["insurance paid", "ins paid", "plan paid", "payer paid"],
+            "deductible": ["deductible", "ded"],
+            "copay": ["copay", "co-pay"],
+            "coinsurance": ["coinsurance", "coins"],
+            "non_covered": ["non covered", "non-covered", "not covered"],
+            "patient_resp_total": ["patient responsibility", "patient owes", "patient amount"],
+        },
+        description="Synonyms used to normalize header labels across varied statements.",
+    )
 
     @validator("data_dir", "template_dir", "code_dictionary_path", "glossary_path", pre=True)
     def expand_path(cls, value: Path | str) -> Path:

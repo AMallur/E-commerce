@@ -1,17 +1,17 @@
 """Main deterministic parsing pipeline for medical bills."""
 from __future__ import annotations
 
-import json
 import logging
 import re
 from dataclasses import asdict
 from datetime import datetime
 from pathlib import Path
-from typing import Dict, Iterable, List, Optional
+from typing import Dict, List, Optional, Sequence, Tuple
 
 import rapidfuzz.process
 
 from app.config import AppSettings, get_settings
+from app.explainers import ExplanationContext, build_explainer
 from app.models import (
     Adjustment,
     Header,
@@ -27,10 +27,12 @@ from app.redaction import redact_text
 LOGGER = logging.getLogger(__name__)
 
 
-def _parse_amount(value: str) -> Optional[float]:
+def _parse_amount(value: str | float | int | None) -> Optional[float]:
     if value is None:
         return None
-    cleaned = value.replace("$", "").replace(",", "").strip()
+    if isinstance(value, (int, float)):
+        return float(value)
+    cleaned = str(value).replace("$", "").replace(",", "").strip()
     if cleaned == "":
         return None
     multiplier = -1.0 if cleaned.startswith("(") and cleaned.endswith(")") else 1.0
@@ -70,108 +72,65 @@ def _normalize_header(raw_text: str, settings: AppSettings) -> Header:
     )
 
 
-def _load_code_dictionary(settings: AppSettings) -> Dict[str, str]:
-    try:
-        with settings.code_dictionary_path.open("r", encoding="utf-8") as handle:
-            return json.load(handle)
-    except FileNotFoundError:
-        LOGGER.debug("Code dictionary missing at %s", settings.code_dictionary_path)
-        return {}
+def _canonicalize_header(header: str, settings: AppSettings) -> str:
+    label = header.strip().lower()
+    for canonical, synonyms in settings.header_synonyms.items():
+        if label == canonical or label in synonyms:
+            return canonical
+    return label
 
 
-def _friendly_description(code: Optional[str], raw_description: str, settings: AppSettings) -> str:
-    dictionary = _load_code_dictionary(settings)
-    if code and code in dictionary:
-        return dictionary[code]
-    return raw_description
+def _normalize_headers(headers: Sequence[str], settings: AppSettings) -> List[str]:
+    normalized: List[str] = []
+    for header in headers:
+        normalized.append(_canonicalize_header(header or "", settings))
+    return normalized
 
 
-def _parse_table(table: List[List[str]], settings: AppSettings) -> List[LineItem]:
-    headers = table[0]
+def _row_to_map(headers: Sequence[str], row: Sequence[str]) -> Dict[str, str]:
+    return {headers[i]: (row[i] if i < len(row) else "") for i in range(len(headers))}
+
+
+def _parse_table(
+    table: Sequence[Sequence[str]],
+    settings: AppSettings,
+    explainer,
+    line_offset: int,
+) -> Tuple[List[LineItem], int]:
+    headers = _normalize_headers(table[0], settings)
     rows = table[1:]
-    normalized_headers = [header.lower() if header else "" for header in headers]
     lines: List[LineItem] = []
-    for idx, row in enumerate(rows, start=1):
-        row_map = {normalized_headers[i]: (row[i] if i < len(row) else "") for i in range(len(headers))}
-        description = row_map.get("description", row_map.get("service", "")).strip()
-        raw_code = row_map.get("code", "").strip()
-        code = raw_code or None
-        allowed = _parse_amount(row_map.get("allowed", ""))
-        charge = _parse_amount(row_map.get("charge", "") or "0") or 0.0
-        payer_paid = _parse_amount(row_map.get("insurance paid", ""))
-        deductible = _parse_amount(row_map.get("deductible", "")) or 0.0
-        copay = _parse_amount(row_map.get("copay", "")) or 0.0
-        coinsurance = _parse_amount(row_map.get("coinsurance", "")) or 0.0
-        noncovered = _parse_amount(row_map.get("non-covered", "")) or 0.0
-        adjustments = []
-        adjustment_val = _parse_amount(row_map.get("adjustment", "") or row_map.get("adj", ""))
-        if adjustment_val:
-            adjustments.append(Adjustment(type="contractual", amount=adjustment_val))
-        patient_resp = PatientResponsibility(
-            deductible=deductible,
-            copay=copay,
-            coinsurance=coinsurance,
-            non_covered=noncovered,
-        )
-        patient_total = patient_resp.total()
-        if payer_paid is not None:
-            derived_patient = max(charge + sum(adj.amount for adj in adjustments) - payer_paid, 0.0)
-            if abs(derived_patient - patient_total) > 0.01:
-                LOGGER.debug(
-                    "Derived patient responsibility %.2f differs from components %.2f", derived_patient, patient_total
-                )
-                patient_total = max(patient_total, derived_patient)
-        explanation = _build_explanation(
-            line_no=idx,
-            description=description,
-            code=code,
-            charge=charge,
-            allowed=allowed,
-            adjustments=adjustments,
-            payer_paid=payer_paid,
-            patient_resp=patient_resp,
-            patient_total=patient_total,
-            settings=settings,
-        )
-        line_item = LineItem(
-            line_no=idx,
-            date_of_service=None,
-            code_type="UNKNOWN",
-            code=code,
-            modifiers=[],
-            description_raw=description,
-            units=None,
-            charge=charge,
-            allowed=allowed,
-            adjustments=adjustments,
-            payer_paid=payer_paid,
-            patient_resp=patient_resp,
-            patient_owes_line=patient_total,
-            explanation=explanation,
-            confidence=0.6,
-            warnings=[],
-        )
-        lines.append(line_item)
-    return lines
+    line_no = line_offset
+    for row in rows:
+        if not any(cell.strip() for cell in row):
+            continue
+        row_map = _row_to_map(headers, row)
+        line = _build_line_item(row_map, line_no, settings, explainer, base_confidence=0.75, source="table")
+        lines.append(line)
+        line_no += 1
+    return lines, line_no
 
 
-def _parse_text_rows(raw_text: str, settings: AppSettings) -> List[LineItem]:
+def _parse_text_rows(raw_text: str, settings: AppSettings, explainer, line_offset: int) -> Tuple[List[LineItem], int]:
     """Fallback parser for tab or whitespace separated tables in raw text."""
     lines = raw_text.splitlines()
     header_line = None
     for line in lines:
-        if "charge" in line.lower() and "allowed" in line.lower():
+        lowered = line.lower()
+        if "charge" in lowered and ("allowed" in lowered or "insurance" in lowered or "patient" in lowered):
             header_line = line
             break
     if not header_line:
-        return []
+        return [], line_offset
     if "\t" in header_line:
         headers = [h.strip().lower() for h in header_line.split("\t")]
     else:
         headers = [h.strip().lower() for h in re.split(r"\s{2,}", header_line)]
+    headers = _normalize_headers(headers, settings)
     data_lines = lines[lines.index(header_line) + 1 :]
     parsed_lines: List[LineItem] = []
-    for idx, row in enumerate(data_lines, start=1):
+    line_no = line_offset
+    for row in data_lines:
         if not row.strip():
             continue
         if "\t" in row:
@@ -180,113 +139,152 @@ def _parse_text_rows(raw_text: str, settings: AppSettings) -> List[LineItem]:
             cells = re.split(r"\s{2,}", row)
         if len(cells) < 3:
             continue
-        row_map = {headers[i]: cells[i].strip() if i < len(cells) else "" for i in range(len(headers))}
-        description = row_map.get("description", row_map.get("service", row_map.get("cpt  description", "")))
-        code = row_map.get("code") or None
-        charge = _parse_amount(row_map.get("charge", "") or "0") or 0.0
-        allowed = _parse_amount(row_map.get("allowed", ""))
-        payer_paid = _parse_amount(row_map.get("insurance paid", row_map.get("ins paid", "")))
-        deductible = _parse_amount(row_map.get("deductible", "")) or 0.0
-        copay = _parse_amount(row_map.get("copay", "")) or 0.0
-        coinsurance = _parse_amount(row_map.get("coinsurance", row_map.get("coins", ""))) or 0.0
-        patient_resp = PatientResponsibility(
-            deductible=deductible,
-            copay=copay,
-            coinsurance=coinsurance,
+        row_map = _row_to_map(headers, [cell.strip() for cell in cells])
+        line = _build_line_item(
+            row_map,
+            line_no,
+            settings,
+            explainer,
+            base_confidence=0.55,
+            source="text",
         )
-        patient_total = patient_resp.total()
-        explanation = _build_explanation(
-            line_no=idx,
-            description=description,
-            code=code,
-            charge=charge,
-            allowed=allowed,
-            adjustments=[],
-            payer_paid=payer_paid,
-            patient_resp=patient_resp,
-            patient_total=patient_total if patient_total else (charge - (payer_paid or 0.0)),
-            settings=settings,
-        )
-        parsed_lines.append(
-            LineItem(
-                line_no=idx,
-                date_of_service=None,
-                code_type="UNKNOWN",
-                code=code,
-                modifiers=[],
-                description_raw=description,
-                units=None,
-                charge=charge,
-                allowed=allowed,
-                adjustments=[],
-                payer_paid=payer_paid,
-                patient_resp=patient_resp,
-                patient_owes_line=patient_total if patient_total else max(charge - (payer_paid or 0.0), 0.0),
-                explanation=explanation,
-                confidence=0.4,
-                warnings=["Parsed from raw text"],
-            )
-        )
-    return parsed_lines
+        line.warnings.append("Parsed from raw text")
+        parsed_lines.append(line)
+        line_no += 1
+    return parsed_lines, line_no
 
 
-def _build_explanation(
+def _build_line_item(
+    row_map: Dict[str, str],
     line_no: int,
-    description: str,
-    code: Optional[str],
-    charge: float,
-    allowed: Optional[float],
-    adjustments: Iterable[Adjustment],
-    payer_paid: Optional[float],
-    patient_resp: PatientResponsibility,
-    patient_total: float,
     settings: AppSettings,
-) -> str:
-    code_part = f" (code {code})" if code else ""
-    adjustment_text = ""
-    if adjustments:
-        adj_total = sum(adj.amount for adj in adjustments)
-        adjustment_text = f" After adjustments totalling {settings.output_currency}{abs(adj_total):,.2f},"
-    allowed_text = ""
-    if allowed is not None:
-        allowed_text = f" Allowed amount {settings.output_currency}{allowed:,.2f}."
-    payer_text = ""
-    if payer_paid is not None:
-        payer_text = f" Insurer paid {settings.output_currency}{payer_paid:,.2f}."
-    components = []
-    if patient_resp.deductible:
-        components.append(f"deductible {settings.output_currency}{patient_resp.deductible:,.2f}")
-    if patient_resp.copay:
-        components.append(f"copay {settings.output_currency}{patient_resp.copay:,.2f}")
-    if patient_resp.coinsurance:
-        components.append(f"coinsurance {settings.output_currency}{patient_resp.coinsurance:,.2f}")
-    if patient_resp.non_covered:
-        components.append(f"non-covered {settings.output_currency}{patient_resp.non_covered:,.2f}")
-    comp_text = ", ".join(components) if components else "patient responsibility components"
-    return (
-        f"Line {line_no}:{code_part} {description}. Provider charged {settings.output_currency}{charge:,.2f}."
-        f"{adjustment_text}{allowed_text}{payer_text} Your share is {comp_text} totaling"
-        f" {settings.output_currency}{patient_total:,.2f}."
-    ).strip()
+    explainer,
+    base_confidence: float,
+    source: str,
+) -> LineItem:
+    description = row_map.get("description") or row_map.get("service") or row_map.get("item") or ""
+    description = description.strip()
+    raw_code = row_map.get("code", "").strip()
+    code = raw_code or _extract_code_from_description(description)
+    code_type = row_map.get("code_type", "UNKNOWN").strip().upper() or "UNKNOWN"
+    modifiers_raw = row_map.get("modifiers", "").strip()
+    modifiers = [m.strip() for m in re.split(r"[,\s]+", modifiers_raw) if m.strip()] if modifiers_raw else []
+    units = _parse_amount(row_map.get("units"))
+    if units is not None:
+        units = float(units)
+    date_of_service = _parse_date(row_map.get("date_of_service"), settings)
+    charge = _parse_amount(row_map.get("charge")) or 0.0
+    allowed = _parse_amount(row_map.get("allowed"))
+    payer_paid = _parse_amount(row_map.get("payer_paid"))
+    adjustment_value = _parse_amount(row_map.get("adjustment"))
+    adjustments: List[Adjustment] = []
+    if adjustment_value is not None and adjustment_value != 0:
+        adjustments.append(Adjustment(type="contractual", amount=adjustment_value))
+
+    patient_resp = PatientResponsibility(
+        deductible=_parse_amount(row_map.get("deductible")) or 0.0,
+        copay=_parse_amount(row_map.get("copay")) or 0.0,
+        coinsurance=_parse_amount(row_map.get("coinsurance")) or 0.0,
+        non_covered=_parse_amount(row_map.get("non_covered")) or 0.0,
+    )
+    other_components = {k: _parse_amount(v) or 0.0 for k, v in row_map.items() if k.startswith("patient_resp_")}
+    patient_resp.other.update({k.replace("patient_resp_", ""): v for k, v in other_components.items() if v})
+
+    patient_total = patient_resp.total()
+    explicit_patient_total = _parse_amount(row_map.get("patient_resp_total"))
+    if explicit_patient_total is not None and explicit_patient_total > 0:
+        patient_total = explicit_patient_total
+    derived_patient = charge + sum(adj.amount for adj in adjustments) - (payer_paid or 0.0)
+    if patient_total == 0 and derived_patient > 0:
+        patient_total = derived_patient
+    elif abs(derived_patient - patient_total) > 0.05:
+        LOGGER.debug(
+            "Line %s: derived patient %.2f differs from components %.2f", line_no, derived_patient, patient_total
+        )
+
+    explanation_context = ExplanationContext(
+        line_no=line_no,
+        description=description or "Service",
+        code=code,
+        code_type=code_type,
+        date_of_service=date_of_service.isoformat() if date_of_service else None,
+        charge=charge,
+        allowed=allowed,
+        payer_paid=payer_paid,
+        adjustments=adjustments,
+        patient_resp=patient_resp,
+        patient_total=max(patient_total, 0.0),
+        units=units,
+        provider=None,
+        payer=None,
+    )
+    explanation, narrative_confidence, explanation_warnings = explainer.explain(explanation_context)
+
+    confidence = min(1.0, max(base_confidence, narrative_confidence))
+    warnings = list(explanation_warnings)
+    if source == "text":
+        confidence -= 0.1
+
+    return LineItem(
+        line_no=line_no,
+        date_of_service=date_of_service,
+        code_type=code_type,
+        code=code,
+        modifiers=modifiers,
+        description_raw=description or "Service",
+        units=units,
+        charge=charge,
+        allowed=allowed,
+        adjustments=adjustments,
+        payer_paid=payer_paid,
+        patient_resp=patient_resp,
+        patient_owes_line=max(patient_total, 0.0),
+        explanation=explanation,
+        confidence=max(confidence, 0.1),
+        warnings=warnings,
+    )
+
+
+def _parse_date(value: Optional[str], settings: AppSettings):
+    if not value:
+        return None
+    value = value.strip()
+    for fmt in settings.date_formats:
+        try:
+            return datetime.strptime(value, fmt).date()
+        except ValueError:
+            continue
+    return None
+
+
+def _extract_code_from_description(description: str) -> Optional[str]:
+    matches = re.findall(r"\b([A-Z]{1,2}\d{3,4}|\d{4,5})\b", description)
+    return matches[0] if matches else None
 
 
 def parse_document(pdf_path: Path, settings: Optional[AppSettings] = None) -> ParsedDocument:
     settings = settings or get_settings()
+    explainer = build_explainer(settings)
     raw_text = extract_text(pdf_path)
     header = _normalize_header(raw_text, settings)
+    header.provider = header.provider or None
+    header.payer = header.payer or None
+
     tables = iter_tables(pdf_path)
     lines: List[LineItem] = []
+    current_line_no = 1
     for table in tables:
         if not table:
             continue
         try:
-            lines.extend(_parse_table(table, settings))
+            parsed, current_line_no = _parse_table(table, settings, explainer, current_line_no)
+            lines.extend(parsed)
         except Exception as exc:  # pragma: no cover - logging path
             LOGGER.warning("Failed to parse table: %s", exc)
     if not lines:
-        lines = _parse_text_rows(raw_text, settings)
+        parsed, current_line_no = _parse_text_rows(raw_text, settings, explainer, current_line_no)
+        lines.extend(parsed)
     if not lines:
-        # fallback: create single placeholder line summarizing charges from heuristics
         total_charge = 0.0
         totals_match = rapidfuzz.process.extractOne("total", raw_text.splitlines())
         if totals_match:
@@ -313,6 +311,31 @@ def parse_document(pdf_path: Path, settings: Optional[AppSettings] = None) -> Pa
             warnings=["Table extraction failed"],
         )
         lines.append(placeholder)
+
+    for line in lines:
+        # enrich explanation context with header details when available
+        if header.provider or header.payer:
+            context = ExplanationContext(
+                line_no=line.line_no,
+                description=line.description_raw,
+                code=line.code,
+                code_type=line.code_type,
+                date_of_service=line.date_of_service.isoformat() if line.date_of_service else None,
+                charge=line.charge,
+                allowed=line.allowed,
+                payer_paid=line.payer_paid,
+                adjustments=line.adjustments,
+                patient_resp=line.patient_resp,
+                patient_total=line.patient_owes_line,
+                units=line.units,
+                provider=header.provider,
+                payer=header.payer,
+            )
+            narrative, confidence, warnings = explainer.explain(context)
+            line.explanation = narrative
+            line.confidence = max(line.confidence, confidence)
+            line.warnings.extend(warnings)
+
     totals = Totals()
     totals.total_charge = sum(line.charge for line in lines)
     allowed_values = [line.allowed for line in lines if line.allowed is not None]
@@ -321,22 +344,49 @@ def parse_document(pdf_path: Path, settings: Optional[AppSettings] = None) -> Pa
     totals.payer_paid = sum(line.payer_paid or 0.0 for line in lines)
     totals.patient_owes = sum(line.patient_owes_line for line in lines)
     totals.reconciles = abs(totals.total_charge + totals.total_adjustments - totals.payer_paid - totals.patient_owes) < 0.05
-    math_checks = [
+
+    math_checks: List[MathCheck] = []
+    for line in lines:
+        diff = line.charge + sum(adj.amount for adj in line.adjustments) - (line.payer_paid or 0.0) - line.patient_owes_line
+        math_checks.append(
+            MathCheck(
+                name=f"line_{line.line_no}_balance",
+                passed=abs(diff) < 0.05,
+                details=f"Residual difference {diff:+.2f}",
+            )
+        )
+        if abs(diff) >= 0.05:
+            line.warnings.append("Line math does not perfectly reconcile")
+    math_checks.append(
         MathCheck(
             name="sum_lines_equals_totals",
             passed=totals.reconciles,
             details="Charge + adjustments = payments + patient responsibility",
         )
-    ]
+    )
+
+    doc_type = _determine_doc_type(lines)
+    notes: List[str] = []
+    if not totals.reconciles:
+        notes.append("Totals do not perfectly reconcile; review figures above.")
+
     doc = ParsedDocument(
-        doc_type="unknown",
+        doc_type=doc_type,
         header=header,
         lines=lines,
         totals=totals,
         math_checks=math_checks,
-        notes=[],
+        notes=notes,
     )
     return doc
+
+
+def _determine_doc_type(lines: Sequence[LineItem]) -> str:
+    if any(line.patient_resp.total() > 0 for line in lines) and any(line.payer_paid for line in lines):
+        return "eob"
+    if any(line.allowed for line in lines):
+        return "provider_bill"
+    return "unknown"
 
 
 def parsed_document_to_dict(document: ParsedDocument) -> Dict:

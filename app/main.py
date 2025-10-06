@@ -6,10 +6,9 @@ import logging
 import shutil
 import tempfile
 from pathlib import Path
-from typing import Any, Dict
 
 from fastapi import FastAPI, File, HTTPException, UploadFile
-from fastapi.responses import FileResponse, JSONResponse
+from fastapi.responses import FileResponse, HTMLResponse, JSONResponse
 
 from app.config import get_settings
 from app.parsing.pipeline import parse_document, parsed_document_to_dict
@@ -17,7 +16,7 @@ from app.rendering.report import render_html, write_pdf
 
 LOGGER = logging.getLogger(__name__)
 
-app = FastAPI(title="Medical Bill Explainer", version="1.0.0")
+app = FastAPI(title="Medical Bill Explainer", version="1.1.0")
 
 
 @app.post("/parse")
@@ -59,9 +58,6 @@ async def render_bill(file: UploadFile = File(...)) -> FileResponse:
 
 __all__ = ["app"]
 
-from fastapi.responses import HTMLResponse
-
-
 @app.get("/", response_class=HTMLResponse)
 async def index() -> str:
     return """<!DOCTYPE html>
@@ -82,8 +78,14 @@ button:disabled { background: #a5b4fc; cursor: not-allowed; }
 .card-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(180px, 1fr)); gap: 1rem; }
 .card { background: #eff6ff; padding: 1rem; border-radius: 0.5rem; }
 summary { font-weight: bold; }
-.accordion { margin-top: 1.5rem; }
-.line-card { border: 1px solid #cbd5f5; border-radius: 0.5rem; padding: 1rem; margin-bottom: 1rem; }
+.accordion { margin-top: 1.5rem; display: grid; gap: 0.75rem; }
+details.line-card { border: 1px solid #cbd5f5; border-radius: 0.5rem; padding: 0.75rem 1rem; background: #fff; }
+details.line-card summary { cursor: pointer; font-weight: 600; list-style: none; }
+details.line-card summary::-webkit-details-marker { display: none; }
+.line-body { margin-top: 0.75rem; font-size: 0.95rem; color: #1f2937; }
+.line-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(160px, 1fr)); gap: 0.5rem; margin-top: 0.75rem; }
+.line-grid div { background: #eff6ff; border-radius: 0.4rem; padding: 0.6rem; }
+.warnings { color: #dc2626; font-size: 0.85rem; margin-top: 0.5rem; }
 </style>
 </head>
 <body>
@@ -147,24 +149,56 @@ uploadBtn.addEventListener('click', async () => {
     totals.patient.textContent = formatCurrency(payload.totals.patient_owes);
     linesContainer.innerHTML = '';
     payload.lines.forEach(line => {
-      const card = document.createElement('div');
+      const card = document.createElement('details');
       card.className = 'line-card';
-      const heading = document.createElement('h3');
-      heading.textContent = `Line ${line.line_no}: ${line.code || ''}`;
-      const body = document.createElement('p');
-      body.textContent = line.explanation;
-      const list = document.createElement('ul');
-      const fields = ['charge','allowed','payer_paid','patient_owes_line'];
-      fields.forEach(field => {
+      const summary = document.createElement('summary');
+      const headingCode = line.code ? ` (${line.code})` : '';
+      summary.textContent = `Line ${line.line_no}${headingCode}: ${line.description_raw}`;
+      card.appendChild(summary);
+
+      const body = document.createElement('div');
+      body.className = 'line-body';
+      const narrative = document.createElement('p');
+      narrative.textContent = line.explanation;
+      body.appendChild(narrative);
+
+      const grid = document.createElement('div');
+      grid.className = 'line-grid';
+      const numericFields = [
+        ['charge', 'Charge'],
+        ['allowed', 'Allowed'],
+        ['payer_paid', 'Insurance Paid'],
+        ['patient_owes_line', 'Patient Owes'],
+        ['confidence', 'Confidence'],
+      ];
+      numericFields.forEach(([field, label]) => {
         if (line[field] !== null && line[field] !== undefined) {
-          const item = document.createElement('li');
-          item.textContent = `${field.replace(/_/g,' ')}: ${formatCurrency(line[field])}`;
-          list.appendChild(item);
+          const cell = document.createElement('div');
+          const value = field === 'confidence' ? `${(line[field] * 100).toFixed(0)}%` : formatCurrency(line[field]);
+          cell.innerHTML = `<strong>${label}</strong><br>${value}`;
+          grid.appendChild(cell);
         }
       });
-      card.appendChild(heading);
+      body.appendChild(grid);
+
+      if (line.patient_resp_components) {
+        const respEntries = Object.entries(line.patient_resp_components).filter(([, value]) => value);
+        if (respEntries.length) {
+          const resp = document.createElement('div');
+          resp.style.marginTop = '0.75rem';
+          resp.innerHTML = `<strong>Patient responsibility breakdown:</strong> ${respEntries.map(([name, value]) => `${name.replace(/_/g, ' ')} ${formatCurrency(value)}`).join(', ')}`;
+          body.appendChild(resp);
+        }
+      }
+
+      if (line.warnings && line.warnings.length) {
+        const warn = document.createElement('div');
+        warn.className = 'warnings';
+        warn.textContent = `Warnings: ${line.warnings.join(', ')}`;
+        body.appendChild(warn);
+      }
+
       card.appendChild(body);
-      card.appendChild(list);
       linesContainer.appendChild(card);
     });
     downloadJson.href = URL.createObjectURL(new Blob([JSON.stringify(payload, null, 2)], { type: 'application/json' }));

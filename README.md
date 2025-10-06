@@ -5,9 +5,10 @@ This project ingests medical bill PDFs (provider invoices or explanation of bene
 ## Features
 
 - Deterministic PDF parsing pipeline with OCR detection fallback hooks
-- Per-line explanations with charge, allowed amounts, adjustments, and patient responsibility
+- Per-line explanations that justify medical necessity and reconcile math for each service
 - Configurable via environment variables and optional JSON overrides
-- FastAPI service with file upload, JSON API, and minimal single-page UI
+- Optional LLM-backed wording for explanations (deterministic fallback always available)
+- FastAPI service with file upload, JSON API, and a single-page UI featuring expandable dropdowns per line item
 - HTML report rendered with Jinja2 and optional PDF rendering via WeasyPrint
 - PHI redaction utility to keep sensitive information out of logs and reports when enabled
 - Unit tests and golden fixtures for regression coverage
@@ -74,8 +75,10 @@ Key environment variables:
 
 - `REDACT_PHI`: Hide PHI in outputs (default `true`)
 - `PERSIST_UPLOADS`: Keep uploaded PDFs on disk (default `false`)
-- `OCR_LANGS`: Languages used by Tesseract OCR (default `eng`)
-- `LLM_PROVIDER` / `LLM_API_KEY`: Optional LLM integration for explanation phrasing
+- `OCR_LANGUAGES`: Languages used by Tesseract OCR (default `eng`)
+- `HEADER_SYNONYMS`: JSON map of column headings to canonical labels for the parser
+- `LLM_PROVIDER` / `LLM_API_KEY`: Optional LLM integration for narrative polishing
+- `LLM_MODEL`, `LLM_TEMPERATURE`, `LLM_MAX_TOKENS`: Additional tuning for the LLM explainer when enabled
 
 ## Tests
 
