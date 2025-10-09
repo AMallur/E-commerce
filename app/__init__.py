@@ -1,6 +1,7 @@
-"""Medical bill explainer package."""
+"""Aurora Accounting Workspace application package."""
 
 __all__ = [
+    "accounting",
     "config",
-    "models",
+    "schemas",
 ]

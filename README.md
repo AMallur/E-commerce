@@ -1,103 +1,71 @@
-# Medical Bill Explainer
+# Aurora Accounting Workspace
 
-This project ingests medical bill PDFs (provider invoices or explanation of benefits) and produces a structured JSON file along with an HTML/PDF report that explains every charge in plain English. The system includes a command line tool and a FastAPI web service with a lightweight browser UI.
+Aurora Accounting Workspace is an AI-augmented bookkeeping cockpit inspired by modern close platforms. It ships with a FastAPI backend, a glassmorphism dashboard UI, and an in-memory double-entry engine that can be swapped for a persistent datastore. The app highlights real-time metrics, renders core financial statements, and lets teams capture balanced journal entries directly from the browser.
 
 ## Features
 
-- Deterministic PDF parsing pipeline with OCR detection fallback hooks
-- Per-line explanations that justify medical necessity and reconcile math for each service
-- Configurable via environment variables and optional JSON overrides
-- Optional LLM-backed wording for explanations (deterministic fallback always available)
-- FastAPI service with file upload, JSON API, and a single-page UI featuring expandable dropdowns per line item
-- HTML report rendered with Jinja2 and optional PDF rendering via WeasyPrint
-- PHI redaction utility to keep sensitive information out of logs and reports when enabled
-- Unit tests and golden fixtures for regression coverage
+- FastAPI service with JSON endpoints for accounts, journal entries, and financial statements
+- In-memory accounting engine with double-entry enforcement, demo data seeding, and cash-flow tagging
+- Rich single-page dashboard showing cash, receivables, payables, income statement, and balance sheet snapshots
+- Quick journal capture form with automatic balancing validation and tag support for operating/investing/financing activities
+- Configurable currency, fiscal year start month, and demo seeding via environment variables
 
-## Requirements
-
-- Python 3.11+
-- System packages: `poppler-utils`, `tesseract-ocr`, Java (for Tabula) when advanced extraction is used
-- Python dependencies listed in `pyproject.toml`
-
-### Installing Tesseract
-
-| Platform | Command |
-| --- | --- |
-| macOS (Homebrew) | `brew install tesseract` |
-| Ubuntu/Debian | `sudo apt-get install tesseract-ocr` |
-| Windows (Chocolatey) | `choco install tesseract` |
-
-Set the optional `TESSDATA_PREFIX` environment variable if using custom language packs.
-
-## Setup
+## Getting Started
 
 ```bash
 python -m venv .venv
-source .venv/bin/activate  # On Windows use .venv\\Scripts\\activate
+source .venv/bin/activate  # Windows: .venv\Scripts\activate
 pip install -U pip
 pip install -r requirements.txt
 ```
 
-Copy `.env.example` to `.env` and adjust as needed.
+Create a `.env` file to override settings if desired:
 
-## Command Line Usage
-
-```bash
-python -m app.cli sample.pdf -o out/
+```
+APP_NAME=Aurora Accounting Workspace
+DEFAULT_CURRENCY=USD
+FISCAL_YEAR_START_MONTH=1
+SEED_DEMO_DATA=true
+MAX_ENTRIES_RETURNED=200
 ```
 
-Outputs `parsed.json`, `report.html`, and (if WeasyPrint is installed) `report.pdf` in the specified directory.
-
-### Optional Flags
-
-- `--json-only`: skip HTML/PDF rendering
-- `--html-only`: skip PDF generation
-- `--config CONFIG.json`: apply runtime overrides to configuration values
-- `--debug`: enable verbose logging
-
-## FastAPI Server
-
-Run the server with Uvicorn:
+Run the development server:
 
 ```bash
 uvicorn app.main:app --reload
 ```
 
-Then open [http://localhost:8000](http://localhost:8000) to access the web UI. Upload a PDF to view totals, per-line explanations, and download the JSON output.
+Open [http://localhost:8000](http://localhost:8000) to interact with the dashboard. The API surface is available under `/docs` thanks to FastAPI's automatic OpenAPI generation.
 
-Programmatic clients can POST `/parse` with a file upload to receive the JSON payload. `/render` returns a generated PDF report (requires WeasyPrint).
+## API Overview
 
-## Configuration
+| Endpoint | Method | Description |
+| --- | --- | --- |
+| `/api/accounts` | GET | List all accounts in the ledger |
+| `/api/accounts` | POST | Create a new ledger account |
+| `/api/journal` | GET | Return recent journal entries (bounded by `MAX_ENTRIES_RETURNED`) |
+| `/api/journal` | POST | Record a balanced journal entry |
+| `/api/dashboard` | GET | Aggregated cash, net income, receivables, and payables |
+| `/api/reports/balance-sheet` | GET | Balance sheet snapshot |
+| `/api/reports/income-statement` | GET | Income statement snapshot |
+| `/api/reports/cash-flow` | GET | Cash flow summary grouped by operating/investing/financing |
 
-Refer to [`CONFIG.md`](CONFIG.md) for the full list of tunable settings. The application uses [pydantic-settings](https://docs.pydantic.dev/latest/concepts/pydantic_settings/) and reads environment variables defined in `.env`.
+All monetary values are returned as decimal numbers rounded to two places.
 
-Key environment variables:
-
-- `REDACT_PHI`: Hide PHI in outputs (default `true`)
-- `PERSIST_UPLOADS`: Keep uploaded PDFs on disk (default `false`)
-- `OCR_LANGUAGES`: Languages used by Tesseract OCR (default `eng`)
-- `HEADER_SYNONYMS`: JSON map of column headings to canonical labels for the parser
-- `LLM_PROVIDER` / `LLM_API_KEY`: Optional LLM integration for narrative polishing
-- `LLM_MODEL`, `LLM_TEMPERATURE`, `LLM_MAX_TOKENS`: Additional tuning for the LLM explainer when enabled
-
-## Tests
-
-Run the tests with:
+## Testing
 
 ```bash
 pytest
 ```
 
-Fixtures are located in `tests/fixtures/` and cover digital, scanned, and edge-case sample PDFs. Golden JSON fixtures ensure explanations remain stable.
+The test suite covers the accounting engine to ensure debits and credits balance, statement rollups reconcile, and cash-flow tags allocate changes correctly.
 
-## Limitations
+## Extending
 
-- Complex handwritten or heavily degraded scans may require manual review.
-- The deterministic parser focuses on common layouts; unusual table structures may fall back to coarse totals with warnings.
-- PDF rendering requires WeasyPrint; install system dependencies (Cairo, Pango) to enable it.
-- No external APIs are called unless optional LLM features are configured.
+- Replace the in-memory engine with a database-backed repository by adapting `AccountingEngine`
+- Add authentication middleware for multi-tenant deployments
+- Wire up LLM copilots for anomaly detection, variance explanations, and proactive close tasks
 
-## Privacy
+## License
 
-The project avoids storing PHI by default. Uploaded PDFs are processed in temporary directories and deleted unless `PERSIST_UPLOADS=true`. Reports include a disclaimer stating the educational purpose of the summaries.
-
+This project is provided for educational and prototyping purposes.
